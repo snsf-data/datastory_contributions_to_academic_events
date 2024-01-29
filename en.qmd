@@ -1,0 +1,1027 @@
+---
+title: "`r params$title`"
+format:
+  html:
+    # To use instead of self-contained that has been deprecated
+    # Using custom page layout (via 'style.css')
+    # Open link in a new window by default
+    # Display footnotes in pop-up window when hovering on it
+    toc: false
+    css: ["style.css"]
+    mainfont: Theinhardt
+    fontsize: "16px"
+    embed-resources: true
+    page-layout: custom
+    link-external-newwindow: true
+    footnotes-hover: true
+    fig-format: svg
+    fig-align: center
+    knitr:
+      opts_chunk:
+        echo: false
+        fig.retina: 3
+        warning: false
+        message: false
+params:
+  title: ""
+  publication_date: ""
+  lang: "en"
+  doi: ""
+  github_url: ""
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r general-setup, include=FALSE}
+## This file contains the ENGLISH version of the data story
+
+# Install snf.datastory package if not available, otherwise load it
+if (!require("snf.datastory")) {
+  if (!require("devtools")) {
+    install.packages("devtools")
+    library(devtools)
+  }
+  install_github("snsf-data/snf.datastory")
+  library(snf.datastory)
+}
+
+# Load packages
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(conflicted)
+library(jsonlite)
+library(here)
+library(glue)
+library(ggiraph)
+library(showtext)
+library(systemfonts)
+library(treemapify)
+
+# Conflict preferences
+conflict_prefer("filter", "dplyr")
+conflict_prefer("get_datastory_theme", "snf.datastory")
+conflict_prefer("get_datastory_scheme", "snf.datastory")
+
+source("R/functions.R")
+
+is_theinhardt_available <- file.exists(here("fonts", "TheinhardtReg.otf"))
+
+if (is_theinhardt_available) {
+  sysfonts::font_add(
+    family = "Theinhardt",
+    regular = here("fonts", "TheinhardtReg.otf"),
+    bold = here("fonts", "TheinhardtBold.otf"),
+    bolditalic = here("fonts", "TheinhardtBoldIt.otf"),
+    italic = here("fonts", "TheinhardtRegIt.otf"),
+  )
+  
+  # Need to register the font to allow its use by ggiraph when creating SVG
+  # files.
+  if (!font_family_exists("Theinhardt")) {
+    # Register existing/downloaded fonts
+    register_font(
+      name = "Theinhardt",
+      plain = list("fonts/TheinhardtReg.otf", 0),
+      bold = list("fonts/TheinhardtBold.otf", 0),
+      italic = list("fonts/TheinhardtRegIt.otf", 0),
+      bolditalic = list("fonts/TheinhardtBoldIt.otf", 0)
+    )
+  }
+  
+  font <- "Theinhardt"
+} else {
+  font <- "Arial"
+}
+
+# Set the locale for date formatting (Windows)
+Sys.setlocale(
+  "LC_TIME",
+  switch(params$lang,
+         en = "English",
+         de = "German",
+         fr = "French"
+  )
+)
+
+# Create function to print number with local language-specific format
+print_num <- function(x) snf.datastory::print_num(x, lang = params$lang)
+
+# Knitr hook for local formatting of printed numbers
+knitr::knit_hooks$set(
+  inline <- function(x) {
+    if (!is.numeric(x)) {
+      x
+    } else {
+      print_num(x)
+    }
+  }
+)
+
+strip_text_size_desk <- 11
+strip_text_size_mob <- 14
+
+axis_text_size_desk <- 9
+axis_text_size_mob <- 12
+
+legend_text_size_desk <- 9
+legend_text_size_mob <- 12
+
+```
+
+```{r print-header-infos}
+#| results: asis
+
+# Add publication date to header
+cat(format(as_datetime(params$publication_date), "%d.%m.%Y"))
+```
+
+```{r story-specific-setup}
+#| include: false
+
+# Load data on project international collaboration
+international_collabs <-
+  read_csv2(
+    here("data", "international_collab.csv"),
+    col_types = cols(
+      grant_number = col_character(),
+      year = col_integer()
+    )
+  )
+
+# Load data on academic events
+acad_event <-
+  read_csv2(
+    here("data", "acad_event.csv"),
+    col_types = cols(
+      grant_number = col_character(),
+      year = col_integer()
+    )
+  ) |>
+  full_join(
+    international_collabs,
+    by = join_by(grant_number, research_institution_type)
+  ) |>
+  mutate(
+    research_area_short =
+      reformat_research_area(
+        research_area,
+        from_lang = "en",
+        to_lang = params$lang,
+        from_format = "long",
+        to_format = "short",
+        output_as_factor = TRUE
+      ),
+    research_area_long =
+      reformat_research_area(
+        research_area_short,
+        from_lang = params$lang,
+        to_lang = params$lang,
+        from_format = "short",
+        to_format = "long",
+        output_as_factor = TRUE
+      )
+  ) |>
+  select(-research_area)
+
+# Processing of academic events data with regards to collaboration (co-applicant
+# or partner) with researcher from different regions of the world.
+event_and_collab_unique <-
+  acad_event |>
+  mutate(
+    has_collab_others = has_collab_latin_am | has_collab_oceania | has_collab_africa
+  ) |> 
+  # Keep distinct records of the following variables (allow to keep only unique
+  # contributions).
+  distinct(
+    has_collab_switzerland, has_collab_europe,
+    has_collab_north_am, has_collab_asia, has_collab_others,
+    pick(event:event_world_region), research_institution_type
+  ) |>
+  # Add Switzerland as a region of the world and an unique id (row number) to
+  # each contribution.
+  mutate(
+    contri_id =
+      if_else(!is.na(event), row_number(), NA),
+    event_world_region =
+      if_else(event_country == "Switzerland", "Switzerland", event_world_region)
+  ) |>
+  pivot_longer(
+    cols = starts_with("has_"),
+    names_to = "partnership_region",
+    values_to = "has_partnership",
+    names_prefix = "has_collab_"
+  )
+
+count_event_and_collab <-
+  event_and_collab_unique |>
+  mutate(
+    eth_or_uni =
+      fct(
+        if_else(
+          research_institution_type %in% c("ETH Domain", "Cantonal university"),
+          "Cantonal universities and ETH domain",
+          "Other institutions"
+        ),
+        levels = c("Cantonal universities and ETH domain", "Other institutions")
+      )
+  ) |>
+  # Compute the proportion of contributions by region of the world. At this
+  # point, the data should be read as follows: one line represent the proportion
+  # of event in the different regions of the world for the variable the variable
+  # indicated in `partnership_region` and `has_partnership`. Proportions sum
+  # thus up at the row, but not column level.
+  summarise(
+    n_event_switzerland =
+      sum(event_world_region == "Switzerland", na.rm = TRUE),
+    n_event_europe =
+      sum(event_world_region == "Europe", na.rm = TRUE),
+    n_event_north_am = sum(event_world_region == "North America", na.rm = TRUE),
+    n_event_asia = sum(event_world_region == "Asia", na.rm = TRUE),
+    n_event_others =
+      sum(
+        event_world_region %in% c("Latin America", "Oceania", "Africa"),
+        na.rm = TRUE
+      ),
+    n_distinct = n_distinct(contri_id) - 1,
+    .by = c(partnership_region, has_partnership, eth_or_uni)
+  ) |>
+  # Now the data are tidier. `pct` sum to one for each combination of
+  # `partnership_region` and `has_partnership`.
+  pivot_longer(
+    cols = starts_with("n_event"),
+    names_to = "event_location",
+    names_prefix = "n_event_",
+    values_to = "n"
+  ) |>
+  # As later we want to compare the percentage of attending a conference in a
+  # given location when there is/is not a partner/co-applicant in that given
+  # region, we filter as follows.
+  filter(partnership_region == event_location) |>
+  mutate(n_total = sum(n_distinct), .by = c(partnership_region, event_location))
+
+```
+
+<!-- Short lead (2-3 sentences) in bold -->
+
+**An analysis of `r print_num(n_distinct(event_and_collab_unique$contri_id) - 1)` academic events associated with SNSF grants revealed a high degree of internationality. `r print_num(round(count_event_and_collab |> filter(event_location != "switzerland") |> summarise(n = sum(n)) |> pull(n) / (n_distinct(event_and_collab_unique$contri_id) - 1) * 100, 0))`% of the contributions were made to events organised outside Switzerland, and the majority were in Europe.**
+
+There are many ways to communicate research results in addition to publications in scientific journals. Academic events, such as scientific conferences, allow researchers to share results with the scientific community and to network. The SNSF collects data about the following types of contributions to academic events:
+
+-   Talk given at a scientific conference
+-   Poster presented at a scientific conference
+-   Individual talk (e.g., for a seminar, workshop, colloquium or as an invited speaker)
+
+```{r dat-contrib-type-shares}
+
+contrib_type_shares <-
+  acad_event |>
+  drop_na(event) |>
+  # Keep distinct records of the following variables (allow to keep only unique
+  # contributions).
+  distinct(
+    grant_number, has_collab_switzerland, has_collab_europe,
+    has_collab_north_am, has_collab_asia, has_collab_latin_am,
+    has_collab_oceania, has_collab_africa, event, event_date, event_year,
+    event_location, event_contribution_title, event_all_involved_person, event_contribution_type, event_country,
+    event_world_region
+  ) |>
+  count(contrib = event_contribution_type) |>
+  mutate(pct = n / sum(n)) |>
+  mutate(
+    contrib = 
+      paste0(translate_events(contrib, params$lang), " (n = ", n, ")"),
+    contrib = fct_reorder(contrib, pct, max)
+  ) |>
+  (\(x)
+   bind_rows(x, mutate(x, pct = 0))
+  )()
+
+conf_talk_share <-
+  max(contrib_type_shares$pct[str_detect(contrib_type_shares$contrib, "conf|Konf")])
+
+conf_indiv_talk_share <-
+  max(contrib_type_shares$pct[str_detect(contrib_type_shares$contrib, "ndiv|Einze")])
+
+conf_post_share <-
+  max(contrib_type_shares$pct[str_detect(contrib_type_shares$contrib, "Poster")])
+
+```
+
+Through its funding, the SNSF supports contributions to scientific events related to the research funded. When an SNSF grant is completed, recipients are asked to provide a list of contributions made to various academic events. For this data story, we analysed the reported contributions to academic events for recently completed grants (those funded in 2017 and 2018). We also focused on our main funding instruments, namely Project funding and Careers grants (see the *Data box* at the end of this story for more details).
+
+### Internationality of contributions to academic events
+
+As the following chart shows, the majority of contributions to academic events are talks given at conferences (`r print_num(round(conf_talk_share * 100, 0))`%). Individual talks (`r print_num(round((conf_indiv_talk_share) * 100, 0))`%) and posters (`r print_num(round(conf_post_share * 100, 0))`%) have similar shares. Interestingly, we will next see that this finding varies when we look at more influencing factors.
+
+::: plot-box
+::: plot-title
+The majority are talks given at a conference
+:::
+
+```{r plot-1-contrib-type}
+
+plot1 <-
+  contrib_type_shares |>
+  mutate(contrib = fct_rev(contrib)) |>
+  ggplot() +
+  aes(x = pct, y = contrib, color = contrib, group = contrib) +
+  geom_line(
+    linewidth = 2,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = filter(contrib_type_shares, pct > 0),
+    size = 4.5,
+    show.legend = FALSE
+  ) +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.1))) +
+  scale_color_manual(values = get_datastory_scheme()) +
+  get_datastory_theme(
+    title_axis = "",
+    text_axis = "x"
+  ) +
+  facet_wrap(
+    ~contrib,
+    scales = "free_y",
+    ncol = 1,
+  ) +
+  theme(
+    strip.text =
+      element_text(
+        face = "plain",
+        hjust = 0,
+        vjust = 0.1,
+        margin = margin(r = 1, b = 2.5),
+        family = "Theinhardt",
+      ),
+    panel.spacing.y = unit(1.25, "lines")
+  )
+
+```
+
+::: {.hide-tablet .hide-mobile}
+```{r plot-1-desktop}
+#| out-width: "100%"
+#| fig-height: 2.5
+
+plot1 +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_desk),
+    strip.text.x = element_text(size = strip_text_size_desk)
+  )
+
+```
+:::
+
+::: hide-desktop
+```{r plot-1-mobile}
+#| out-width: "100%"
+#| fig-height: 2.5
+
+plot1 +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_mob),
+    strip.text.x = element_text(size = strip_text_size_mob)
+  )
+
+```
+:::
+:::
+
+```{r dat-contrib-location-shares}
+
+best_loc <-
+  acad_event |>
+  mutate(
+    event_world_region =
+      if_else(event_country == "Switzerland", event_country, event_world_region)
+  ) |>
+  count(event_world_region, sort = TRUE) |>
+  drop_na() |>
+  mutate(
+    pct = n / sum(n),
+    event_world_region =
+      if_else(event_world_region == "Europe", "Europe (excl. CH)", event_world_region)
+  ) |>
+  arrange(desc(pct))
+
+best_loc_by_contrib <-
+  acad_event |>
+  mutate(
+    event_world_region =
+      if_else(event_country == "Switzerland", event_country, event_world_region)
+  ) |>
+  count(event_world_region, event_contribution_type) |>
+  drop_na() |>
+  mutate(prop = n / sum(n), .by = event_contribution_type)
+
+poster_best_loc <-
+  best_loc_by_contrib |>
+  filter(event_contribution_type == "Poster") |>
+  arrange(desc(prop))
+
+talk_conf_best_loc <-
+  best_loc_by_contrib |>
+  filter(event_contribution_type == "Talk given at a conference") |>
+  arrange(desc(prop))
+
+indiv_best_loc <-
+  acad_event |>
+  mutate(
+    event_world_region =
+      if_else(event_country == "Switzerland", event_country, event_world_region)
+  ) |>
+  count(event_world_region, event_contribution_type) |>
+  drop_na() |>
+  mutate(prop = n / sum(n), .by = event_contribution_type) |>
+  filter(event_contribution_type == "Individual talk") |>
+  slice_max(prop, n = 1)
+
+```
+
+Where do researchers present their results? Among the contributions to academic events, only a minority of presentations were in `r translate_regions(best_loc$event_world_region[2], params$lang)` (`r print_num(round(best_loc$pct[2] * 100, 0))`%), with `r print_num(round(sum(best_loc$pct[1]) * 100, 0))`% of contributions destined for an event in `r translate_regions(best_loc$event_world_region[1], params$lang)`.
+
+::: plot-box
+::: plot-title
+More contributions to international academic events
+:::
+
+```{r plot-2-contrib-location-shares}
+#| out-width: "100%"
+#| fig-height: 3
+
+best_loc |>
+  mutate(
+    event_world_region =
+      fct_lump_prop(
+        event_world_region, 0.01,
+        w = n, other_level = "Africa & Oceania"
+      ),
+    event_world_region =
+      fct_relabel(event_world_region, \(x) translate_regions(x, params$lang)),
+    event_world_region = fct_reorder(event_world_region, pct, max, .desc = TRUE)
+  ) |>
+  summarise(
+    n = sum(n),
+    pct = sum(pct),
+    .by = event_world_region
+  ) |>
+  ggplot() +
+  aes(
+    area = pct,
+    fill = event_world_region,
+    label = paste0(event_world_region, "\n(", round(pct * 100, 0), "%)")
+  ) +
+  geom_treemap(show.legend = FALSE) +
+  geom_treemap_text(
+    colour = "white",
+    place = "centre",
+    grow = FALSE,
+    reflow = TRUE,
+    family = "Theinhardt"
+  ) +
+  scale_fill_manual(values = get_datastory_scheme()[-4]) +
+  get_datastory_theme(remove_plot_margin = TRUE)
+
+```
+:::
+
+How do the types of contributions vary by geographical location? If we examine contributions by type, as shown in the chart below, we find that the preferred location for posters is `r translate_regions(poster_best_loc$event_world_region[1], params$lang)` (`r print_num(round(poster_best_loc$prop[1] * 100, 0))`%), followed by `r translate_regions(poster_best_loc$event_world_region[2], params$lang)` (`r print_num(round(poster_best_loc$prop[2] * 100, 0))`%) and `r translate_regions(poster_best_loc$event_world_region[3], params$lang)` (USA and Canada) (`r print_num(round(poster_best_loc$prop[3] * 100, 0))`%). For talks given at conferences, the pattern is different. `r translate_regions(talk_conf_best_loc$event_world_region[1], params$lang)` is the preferred location with `r print_num(round(talk_conf_best_loc$prop[1] * 100, 0))`%, followed by `r translate_regions(talk_conf_best_loc$event_world_region[2], params$lang)` (`r print_num(round(talk_conf_best_loc$prop[2] * 100, 0))`%) and `r translate_regions(talk_conf_best_loc$event_world_region[3], params$lang)` (`r print_num(round(talk_conf_best_loc$prop[3] * 100, 0))`%).
+
+```{r dat-contrib-location-types-shares}
+
+best_loc_by_contrib_fig_prep <-
+  best_loc_by_contrib |>
+  mutate(
+    event_world_region =
+      if_else(
+        event_world_region == "Europe",
+        "Europe (excl. CH)",
+        event_world_region
+      ),
+    event_world_region =
+      fct_lump_prop(
+        event_world_region, 0.01,
+        w = n, other_level = "Africa & Oceania"
+      ),
+    event_world_region =
+      fct_relabel(event_world_region, \(x) translate_regions(x, params$lang)),
+    event_world_region = fct_reorder(event_world_region, n, mean, .desc = FALSE),
+    event_contribution_type =
+      fct_reorder(
+        translate_events(event_contribution_type, params$lang),
+        n,
+        sum,
+        .desc = TRUE
+      )
+  ) |>
+  summarise(
+    n = sum(n),
+    prop = sum(prop),
+    .by = c(event_world_region, event_contribution_type)
+  )
+
+```
+
+```{r plot-3-contrib-location-types-shares}
+
+plot3 <-
+  best_loc_by_contrib_fig_prep |>
+  ggplot() +
+  aes(x = prop, y = event_contribution_type, fill = event_world_region) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.025))) +
+  get_datastory_theme(
+    text_axis = "x",
+    legend_position = "top"
+  ) +
+  facet_wrap(
+    ~event_contribution_type,
+    scales = "free_y",
+    ncol = 1,
+  ) +
+  theme(
+    strip.text =
+      element_text(
+        face = "plain",
+        hjust = 0,
+        vjust = 0.1,
+        margin = margin(r = 1, b = 2.5),
+        family = "Theinhardt"
+      ),
+    panel.spacing.y = unit(1.25, "lines")
+  )
+
+```
+
+::: plot-box
+::: plot-title
+Talks given at conferences are more international
+:::
+
+::: {.hide-tablet .hide-mobile}
+```{r plot-3-desktop}
+#| out-width: "100%"
+#| fig-height: 3
+
+plot3 +
+  scale_fill_manual(
+    values = rev(get_datastory_scheme(n_col = 7)[-4]),
+    guide = guide_legend(reverse = TRUE, byrow = TRUE, nrow = 1)
+  ) +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_desk),
+    legend.text = element_text(size = legend_text_size_desk),
+    strip.text.x = element_text(size = strip_text_size_desk)
+  )
+
+```
+:::
+
+::: hide-desktop
+```{r plot-3-mobile}
+#| out-width: "100%"
+#| fig-height: 3.5
+
+plot3 +
+  scale_fill_manual(
+    values = rev(get_datastory_scheme(n_col = 7)[-4]),
+    guide = guide_legend(reverse = TRUE, byrow = TRUE, nrow = 2)
+  ) +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_mob),
+    legend.text = element_text(size = legend_text_size_mob),
+    strip.text.x = element_text(size = strip_text_size_mob)
+  )
+
+```
+:::
+:::
+
+```{r dat-contrib-location-area-shares}
+
+best_loc_by_contrib_and_area_fig_prep <-
+  acad_event |>
+  mutate(
+    event_world_region =
+      case_when(
+        event_country == "Switzerland" ~ event_country,
+        event_world_region == "Europe" ~ "Europe (excl. CH)",
+        event_world_region %in% c("Switzerland", "North America") ~ event_world_region,
+        .default = "Others"
+      ),
+  ) |>
+  count(event_world_region, event_contribution_type, research_area_short) |>
+  drop_na() |>
+  mutate(
+    prop = n / sum(n), .by = c(research_area_short, event_contribution_type),
+    event_world_region = fct_infreq(event_world_region, w = n)
+  )
+
+mint_indiv_talk_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Individual talk",
+    research_area_short == "MINT"
+  ) |>
+  pull(prop) |>
+  sum()
+
+mint_talk_conf_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Talk given at a conference",
+    research_area_short == reformat_research_area(
+      "MINT",
+      from_format = "short",
+      from_lang = "en",
+      to_lang = params$lang,
+      to_format = "short"
+    )
+  ) |>
+  pull(prop) |>
+  sum()
+
+ssh_indiv_talk_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Individual talk",
+    research_area_short == reformat_research_area(
+      "SSH",
+      from_format = "short",
+      from_lang = "en",
+      to_lang = params$lang,
+      to_format = "short"
+    )
+  ) |>
+  pull(prop) |>
+  sum()
+
+ssh_talk_conf_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Talk given at a conference",
+    research_area_short == reformat_research_area(
+      "SSH",
+      from_format = "short",
+      from_lang = "en",
+      to_lang = params$lang,
+      to_format = "short"
+    )
+  ) |>
+  pull(prop) |>
+  sum()
+
+ls_indiv_talk_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Individual talk",
+    research_area_short == reformat_research_area(
+      "LS",
+      from_format = "short",
+      from_lang = "en",
+      to_lang = params$lang,
+      to_format = "short"
+    )
+  ) |>
+  pull(prop) |>
+  sum()
+
+ls_talk_conf_international <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  filter(
+    event_world_region != "Switzerland",
+    event_contribution_type == "Talk given at a conference",
+    research_area_short == reformat_research_area(
+      "LS",
+      from_format = "short",
+      from_lang = "en",
+      to_lang = params$lang,
+      to_format = "short"
+    )
+  ) |>
+  pull(prop) |>
+  sum()
+
+plot4 <-
+  best_loc_by_contrib_and_area_fig_prep |>
+  mutate(
+    event_world_region =
+      fct_relabel(event_world_region, \(x) translate_regions(x, params$lang)),
+    event_world_region = fct_reorder(event_world_region, prop, mean, .desc = TRUE),
+    event_contribution_type =
+      fct_reorder(translate_events(event_contribution_type, params$lang), n, sum)
+  ) |>
+  ggplot() +
+  aes(
+    x = prop,
+    y = research_area_short,
+    fill = event_world_region
+  ) +
+  geom_col(position = position_fill(reverse = TRUE)) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_manual(values = get_datastory_scheme()[-4]) +
+  facet_wrap(vars(fct_rev(event_contribution_type)), ncol = 1) +
+  get_datastory_theme(remove_plot_margin = TRUE)
+
+```
+
+How does the research area influence how results are presented? Compared to `r reformat_research_area("SSH", "en", params$lang, "short", "long")` (`r reformat_research_area("SSH", "en", params$lang, "short", "short")`) and `r reformat_research_area("LS", "en", params$lang, "short", "long")` (`r reformat_research_area("LS", "en", params$lang, "short", "short")`), `r reformat_research_area("MINT", "en", params$lang, "short", "long")` (`r reformat_research_area("MINT", "en", params$lang, "short", "short")`) had a higher share of international contributions for individual talks (`r print_num(round(mint_indiv_talk_international * 100, 0))`% compared to `r print_num(round(ssh_indiv_talk_international * 100, 0))`% and `r print_num(round(ls_indiv_talk_international * 100, 0))`% for `r reformat_research_area("SSH", "en", params$lang, "short", "short")` and `r reformat_research_area("LS", "en", params$lang, "short", "short")`) and talks given at conferences (`r print_num(round(mint_talk_conf_international * 100, 0))`% compared to `r print_num(unique(c(round(ssh_talk_conf_international * 100, 0), round(ls_talk_conf_international * 100, 0))))`% for both `r reformat_research_area("SSH", "en", params$lang, "short", "short")` and `r reformat_research_area("LS", "en", params$lang, "short", "short")`).
+
+::: plot-box
+::: plot-title
+`r reformat_research_area("MINT", "en", params$lang, "short", "short")` have more international contributions
+:::
+
+::: {.hide-tablet .hide-mobile}
+```{r plot-4-desktop}
+#| out-width: "100%"
+#| fig-height: 5
+
+plot4 +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_desk),
+    axis.text.y = element_text(size = axis_text_size_desk),
+    strip.text = element_text(size = strip_text_size_desk),
+    legend.text = element_text(size = legend_text_size_desk)
+  )
+
+```
+:::
+
+::: hide-desktop
+```{r plot-4-mobile}
+#| out-width: "100%"
+#| fig-height: 5
+
+plot4 +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_mob),
+    axis.text.y = element_text(size = axis_text_size_mob),
+    strip.text = element_text(size = strip_text_size_mob),
+    legend.text = element_text(size = legend_text_size_mob)
+  )
+
+```
+:::
+:::
+
+These figures reveal an interesting contrast when it comes to the internationality of the different types of contributions: posters and individual talks are less international overall than talks given at conferences. The findings bear some similarities to the observations made in a previous data story looking at the [internationality of project partners](`r translate("https://data.snf.ch/stories/project-partners-and-networked-research-en.html", "https://data.snf.ch/stories/projektpartnerschaften-und-vernetzte-forschung-de.html", "https://data.snf.ch/stories/partenaires-de-projet-et-recherche-en-reseau-fr.html", params$lang)`).
+
+### Does collaboration encourage international contributions?
+
+```{r dat-contrib-location-collab-shares}
+
+contrib_with_and_out_collab <-
+  count_event_and_collab |>
+  summarise(
+    pct = replace_na(sum(n) / sum(n_distinct), 0),
+    n = sum(n),
+    .by = c(event_location, partnership_region, has_partnership, eth_or_uni)
+  ) |>
+  pivot_wider(names_from = has_partnership, values_from = c(pct, n)) |>
+  mutate(
+    diff = pct_TRUE - pct_FALSE,
+    N = n_TRUE + n_FALSE
+  )
+
+contrib_with_and_out_collab_global <-
+  contrib_with_and_out_collab |>
+  filter(event_location != "switzerland") |>
+  summarise(m_diff = weighted.mean(diff, N))
+
+contrib_with_and_out_collab_inst <-
+  contrib_with_and_out_collab |>
+  summarise(m_diff = weighted.mean(diff, N), .by = eth_or_uni)
+
+contrib_with_and_out_collab_other_inst <-
+  contrib_with_and_out_collab |>
+  filter(str_starts(eth_or_uni, "Other")) |>
+  summarise(
+    diff = pct_TRUE - pct_FALSE,
+    .by = event_location
+  )
+
+```
+
+We would like to understand if there is a connection between the declared international collaborations of a grant and the location of its academic events. The data show that having an international collaborator increases the chances of contributing to an academic event in the same world region as the collaborator by only `r print_num(round(contrib_with_and_out_collab_global$m_diff * 100, 0))` percentage points. The internationality of contributions to academic events is generally high and essential for collaboration, regardless of whether there are international collaborators in the project funded by the SNSF.
+
+A more nuanced difference emerges when the type of institution is considered, as in the chart below. For cantonal universities and ETH Domain institutions, having a collaboration in a given region increases the chances of attending an event in that same region by `r print_num(round(contrib_with_and_out_collab_inst$m_diff[contrib_with_and_out_collab_inst$eth_or_uni == "Cantonal universities and ETH domain"] * 100, 0))` percentage points. For other institution types, this rate increases to `r print_num(round(contrib_with_and_out_collab_inst$m_diff[contrib_with_and_out_collab_inst$eth_or_uni == "Other institutions"] * 100, 0))` percentage points.
+
+::: plot-box
+::: plot-title
+Increase in contributions when a collaboration exists in the same region
+:::
+
+```{r plot-5-contrib-location-collab-shares}
+
+count_event_and_collab_dat <-
+  count_event_and_collab |>
+  reframe(
+    pct_diff = (n[has_partnership] / n_distinct[has_partnership]) - (n[!has_partnership] / n_distinct[!has_partnership]),
+    label_pct_hjust = if_else(pct_diff >= 0, -0.75, 1.75),
+    label_loc_hjust = if_else(pct_diff >= 0, 0, 1),
+    .by = c(eth_or_uni, partnership_region)
+  ) |>
+  mutate(
+    label = paste0(if_else(pct_diff >= 0, "+", ""), round(pct_diff * 100, 0), "%"),
+    partnership_region =
+      fct_reorder(
+        str_to_title(str_replace(partnership_region, "_am", " america")) |>
+          str_replace("Europe", "Europe (excl. CH)"),
+        pct_diff,
+        mean,
+        .desc = FALSE
+      ),
+    partnership_region =
+      fct_relabel(partnership_region, \(x) translate_regions(x, params$lang)),
+    eth_or_uni = translate_institutions(eth_or_uni, params$lang)
+  )
+
+plot5 <-
+  count_event_and_collab_dat |>
+  bind_rows(mutate(count_event_and_collab_dat, pct_diff = 0)) |>
+  ggplot() +
+  aes(x = pct_diff, y = partnership_region, color = partnership_region, group = partnership_region) +
+  geom_line(
+    linewidth = 2,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = count_event_and_collab_dat,
+    size = 4.5,
+    show.legend = FALSE
+  ) +
+  scale_x_continuous(
+    limits = c(-0.05, 0.2),
+    breaks = seq(-0.05, 0.2, 0.05),
+    labels = scales::percent
+  ) +
+  scale_color_manual(values = rev(get_datastory_scheme(n_col = 6)[-4])) +
+  facet_wrap(~eth_or_uni, ncol = 2, labeller = labeller(eth_or_uni = label_wrap(35))) +
+  get_datastory_theme(
+    title_axis = "",
+    legend_position = "top",
+    text_axis = "x",
+    legend_key_size = c(8, 8),
+    remove_plot_margin = TRUE
+  )
+
+```
+
+::: {.hide-tablet .hide-mobile}
+```{r plot-5-desktop}
+#| out-width: "100%"
+#| fig-height: 3
+
+plot5 +
+  geom_text(
+    data = mutate(count_event_and_collab_dat, n = 0),
+    aes(
+      label = partnership_region,
+      x = 0,
+      y = as.numeric(as.factor(partnership_region)) + 0.35,
+      hjust = label_loc_hjust
+    ),
+    size = 3.5,
+    show.legend = FALSE,
+    inherit.aes = FALSE,
+    family = "Theinhardt"
+  ) +
+  geom_text(
+    data = mutate(count_event_and_collab_dat, n = 0),
+    aes(
+      label = label,
+      x = pct_diff,
+      y = partnership_region,
+      hjust = label_pct_hjust
+    ),
+    size = 3.5,
+    show.legend = FALSE,
+    inherit.aes = FALSE,
+    family = "Theinhardt"
+  ) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 1))) +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_desk),
+    strip.text = element_text(size = strip_text_size_desk, vjust = 1),
+    panel.spacing.x = unit(2.5, "line")
+  )
+
+```
+:::
+
+::: hide-desktop
+```{r plot-5-mobile}
+#| out-width: "100%"
+#| fig-height: 6
+
+plot5 +
+  geom_text(
+    data = mutate(count_event_and_collab_dat, n = 0),
+    aes(
+      label = partnership_region,
+      x = 0,
+      y = as.numeric(as.factor(partnership_region)) + 0.25,
+      hjust = label_loc_hjust
+    ),
+    size = 4.5,
+    show.legend = FALSE,
+    inherit.aes = FALSE,
+    family = "Theinhardt"
+  ) +
+  geom_text(
+    data = mutate(count_event_and_collab_dat, n = 0),
+    aes(
+      label = label,
+      x = pct_diff,
+      y = partnership_region,
+      hjust = label_pct_hjust
+    ),
+    size = 4.5,
+    show.legend = FALSE,
+    inherit.aes = FALSE,
+    family = "Theinhardt"
+  ) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.8))) +
+  theme(
+    axis.text.x = element_text(size = axis_text_size_mob),
+    strip.text = element_text(size = strip_text_size_mob, vjust = 1),
+    panel.spacing.x = unit(2.5, "line")
+  )
+
+
+```
+:::
+:::
+
+The difference is particularly revealing when we look at academic events organised in Switzerland and North America. For the smaller institution types, having an international collaborator increases the chances of contributing to an academic event in their region by `r print_num(round(contrib_with_and_out_collab_other_inst |> filter(str_starts(event_location, "swi")) |> pull(diff) * 100, 0))` and `r print_num(round(contrib_with_and_out_collab_other_inst |> filter(str_starts(event_location, "north")) |> pull(diff) * 100, 0))` percentage points respectively.
+
+This suggests that having an international collaboration is not linked to an outsized increase in the contribution to international academic events near the collaborator, except for smaller institution types.
+
+In conclusion: this overview of the data related to academic events reveals that contributions made by SNSF grantees are highly international. By supporting its grantees in contributing to academic events, the SNSF helps to promote Swiss research at an international level.
+
+
+```{r desc-dat-info-box}
+
+info_box_summary_grants <-
+  acad_event |>
+  distinct(grant_number, funding_instrument_ga_level1) |>
+  summarise(n = n(), .by = funding_instrument_ga_level1)
+
+info_box_summary_contrib <-
+  acad_event |>
+  # Keep distinct records of the following variables (allow to keep only unique
+  # contributions).
+  distinct(
+    grant_number, pick(event:event_world_region), research_institution_type,
+    funding_instrument_ga_level1
+  ) |>
+  # Add Switzerland as a region of the world and an uniue id (row number) to
+  # each contribution.
+  mutate(
+    contri_id =
+      if_else(!is.na(event), row_number(), NA),
+  ) |>
+  drop_na(event) |>
+  summarise(
+    n = n(),
+    .by = funding_instrument_ga_level1
+  )
+
+```
+
+::: info-box
+### What data did we use?
+
+The SNSF has collected data about different types of research output since 2011. The data used in this data story focus on contributions to academic events reported for grants accepted under the Project funding and Careers funding schemes. To reduce the effect of under-reporting, we have limited our analysis to grants funded in 2017 and 2018 since there was evident under-reporting of output data for earlier years and the number of completed grants for later periods is not yet sufficient.
+
+-   Project funding: `r print_num(info_box_summary_grants$n[1])` grants and `r print_num(info_box_summary_contrib$n[1])` contributions to academic events
+-   Careers: `r print_num(info_box_summary_grants$n[2])` grants and `r print_num(info_box_summary_contrib$n[2])` contributions to academic events
+
+In order to link academic events to scientific collaborations, the existence of a collaboration in a specific region of the world was counted when the grantees indicated in their proposal the inclusion of co-applicants or project partners in that region.
+:::
+
+Data, text and code of this data story are [available on Github](`r params$github_url`) and [archived on Zenodo](`r params$doi`). <br>DOI: `r str_remove(params$doi, "https://doi.org/")`
+
+```{r prevent-internal-snsf-packages, include=FALSE}
+#| include: false
+
+# Internal SNSF packages must not be used in data stories, as their
+# pre-processing functions are internal and the corporate design differs from
+# the data portal.
+if (any(c("snfverse", "snf.preprocessing", "snf.plot") %in%
+        loadedNamespaces())) {
+  stop(glue(
+    "You must not use internal SNSF packages in data stories.",
+    " Please resort to snf.datastory."
+  ))
+}
+```
